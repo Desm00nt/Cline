@@ -2,7 +2,7 @@
 
 2D-рогалик для смартфонов, в котором ты собираешь команду **типичных человечков** и выставляешь их на физические соревнования. Человечки — настоящие тряпичные куклы (ragdoll): их мотает, закручивает, они спотыкаются, падают и сваливаются с арены.
 
-**Готовый APK:** [`dist/RagdollArena-v1.0.apk`](dist/RagdollArena-v1.0.apk) (Android 5.0+, подписан debug-ключом).
+**Готовый APK:** [`dist/RagdollArena-v1.0.apk`](dist/RagdollArena-v1.0.apk) · [скачать из релиза v1.0.0](https://github.com/Desm00nt/Cline/releases/tag/v1.0.0) (Android 5.0+, подписан debug-ключом).
 
 ![Меню](dist/screen-menu.png)
 
