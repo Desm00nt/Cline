@@ -1,0 +1,37 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.ragdollarena.game'
+    compileSdk 33
+    buildToolsVersion '34.0.0'
+
+    defaultConfig {
+        applicationId 'com.ragdollarena.game'
+        minSdk 21
+        targetSdk 33
+        versionCode 1
+        versionName '1.0'
+    }
+
+    buildTypes {
+        debug {
+            applicationIdSuffix ''
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+        encoding 'UTF-8'
+    }
+
+    lint {
+        abortOnError false
+    }
+}
