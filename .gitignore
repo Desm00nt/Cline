@@ -7,3 +7,13 @@ local.properties
 app/build/
 *.hprof
 .DS_Store
+
+# MiniGPT-RU (gpt/): артефакты обучения и окружение
+.venv/
+gpt/out/
+gpt/data/prepared/
+gpt/data/prepared_real/
+gpt/data/raw_real/
+gpt/data/rag_index*.json
+__pycache__/
+.pytest_cache/
