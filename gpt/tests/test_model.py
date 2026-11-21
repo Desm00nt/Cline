@@ -248,3 +248,43 @@ def test_apply_rope_skips_noop_cast_but_same_result():
     got = apply_rope(q16, cos, sin)
     assert got.dtype == torch.bfloat16
     assert (got.float() - expected).abs().max().item() < 5e-2
+
+
+def test_swa_mask_equals_causal_when_window_covers_block():
+    """Если окно не короче блока, маска окна == причинная маска.
+
+    На этом держится быстрый путь: при T <= sliding_window маска не строится,
+    и SDPA уходит на is_causal. Значит результаты обязаны совпадать.
+    """
+    import torch.nn.functional as F
+
+    model = GPT(tiny_cfg(sliding_window=64, block_size=64))
+    T = 32                                  # T <= sliding_window
+    m = model._attention_mask(T, 0, torch.device("cpu"), 64)[0, 0]
+    assert torch.equal(m, torch.ones(T, T, dtype=torch.bool).tril())
+
+    q = torch.randn(1, 4, T, 16)
+    with_mask = F.scaled_dot_product_attention(q, q, q, attn_mask=m)
+    with_causal = F.scaled_dot_product_attention(q, q, q, is_causal=True)
+    assert (with_mask - with_causal).abs().max().item() < 1e-6
+
+
+def test_short_block_forward_uses_mask_free_path():
+    """Обучающий проход с T <= окном обязан давать тот же результат, что с маской."""
+    import torch.nn.functional as F
+
+    torch.manual_seed(11)
+    model = GPT(tiny_cfg(sliding_window=64, block_size=64)).eval()
+    x = torch.randint(0, 512, (2, 32))
+    with torch.no_grad():
+        fast, _ = model(x)
+        # вручную прогоняем то же самое, но с явной причинной маской
+        B, T = x.shape
+        mask = torch.ones(T, T, dtype=torch.bool).tril()[None, None]
+        h = model.tok_emb(x)
+        cos = model.rope_cos[:T].to(h.dtype)
+        sin = model.rope_sin[:T].to(h.dtype)
+        for blk in model.blocks:
+            h = blk(h, cos, sin, None, mask)
+        ref = model.head(model.ln_f(h))
+    assert (fast - ref).abs().max().item() < 1e-5

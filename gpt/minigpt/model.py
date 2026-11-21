@@ -306,7 +306,15 @@ class GPT(nn.Module):
         # всегда, кроме шага длиной 1 — там причинность выполняется тривиально.
         need_global_mask = cache is not None and T > 1
         global_mask = self._attention_mask(T, past, idx.device, None) if need_global_mask else None
-        if any(not b.attn.global_layer for b in self.blocks):
+        # Скользящее окно короче блока — единственная причина строить отдельную
+        # маску. Если окно не короче блока (T <= sliding_window), ограничение
+        # окна не отсекает ни одного токена, маска совпадает с причинной, и её
+        # можно не строить: SDPA уходит на fused-путь is_causal вместо медленного
+        # math-пути с материализацией attn_bias размером B x heads x T^2.
+        # Это главный режим обучения (block_size <= sliding_window).
+        window_bites = T > self.cfg.sliding_window if self.cfg.sliding_window > 0 else False
+        if any(not b.attn.global_layer for b in self.blocks) and (
+                cache is not None or window_bites):
             swa_mask = self._attention_mask(T, past, idx.device, self.cfg.sliding_window)
         else:
             swa_mask = None

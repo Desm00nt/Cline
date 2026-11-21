@@ -21,6 +21,12 @@ import sys
 import time
 from typing import Optional
 
+# KMP_BLOCKTIME=0 отключает ожидание в spin-wait у потоков Intel OpenMP между
+# параллельными областями. На 2 ядрах без этого шаг обучения на ~4% медленнее
+# (замер: 2044 -> 2133 ток/с на `small`). Ставим до импорта torch, иначе
+# переменную уже никто не прочитает. На не-Intel OpenMP просто игнорируется.
+os.environ.setdefault("KMP_BLOCKTIME", "0")
+
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
