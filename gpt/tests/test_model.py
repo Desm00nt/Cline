@@ -188,3 +188,63 @@ def test_z_loss_is_nonnegative_and_changes_loss():
     plain = model.compute_loss(logits, x, z_loss=0.0)
     withz = model.compute_loss(logits, x, z_loss=1e-2)
     assert withz >= plain
+
+
+# ---------------------------------------------------------------------------
+# Оптимизации инференса: обязаны быть численно эквивалентны исходному пути
+# ---------------------------------------------------------------------------
+
+def test_gqa_enable_gqa_matches_repeat_interleave():
+    """enable_gqa в SDPA должен давать то же, что физический repeat_interleave."""
+    import minigpt.model as M
+
+    torch.manual_seed(3)
+    model = GPT(tiny_cfg()).eval()
+    x = torch.randint(0, 512, (2, 37))
+    y = torch.randint(0, 512, (2, 37))
+    with torch.no_grad():
+        M._GQA_OK = True
+        fast, _ = model(x, y)
+        M._GQA_OK = False
+        slow, _ = model(x, y)
+        M._GQA_OK = None
+    assert fast.shape == slow.shape
+    # расхождение — только округление разного порядка сложений в ядре
+    assert (fast - slow).abs().max().item() < 1e-4
+
+
+def test_rmsnorm_fused_matches_manual_formula():
+    """F.rms_norm на fp32 обязан совпадать с ручной формулой в fp32."""
+    from minigpt.model import RMSNorm
+
+    norm = RMSNorm(16)
+    norm.weight.data = torch.randn(16)
+    x = torch.randn(3, 5, 16) * 3.0
+    manual = x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + norm.eps) * norm.weight
+    assert torch.equal(norm(x), manual)
+
+
+def test_rmsnorm_still_fp32_under_autocast():
+    """Под bf16-autocast нормализация не должна терять точность."""
+    from minigpt.model import RMSNorm
+
+    norm = RMSNorm(16)
+    x = torch.randn(2, 4, 16)
+    with torch.autocast("cpu", dtype=torch.bfloat16):
+        out = norm(x)
+    assert out.dtype == torch.float32
+
+
+def test_apply_rope_skips_noop_cast_but_same_result():
+    """Пропуск холостого .float() не должен менять результат ни в fp32, ни в bf16."""
+    cos, sin = build_rope_cache(16, 8, 10000.0)
+    q32 = torch.randn(1, 2, 16, 8)
+    xf = q32.float()
+    rot = torch.cat((-xf[..., 4:], xf[..., :4]), dim=-1)
+    expected = xf * cos[None, None] + rot * sin[None, None]
+    assert torch.equal(apply_rope(q32, cos, sin), expected)
+
+    q16 = q32.to(torch.bfloat16)
+    got = apply_rope(q16, cos, sin)
+    assert got.dtype == torch.bfloat16
+    assert (got.float() - expected).abs().max().item() < 5e-2

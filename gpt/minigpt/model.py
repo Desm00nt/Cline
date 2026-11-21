@@ -40,6 +40,17 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # fp32-вход (инференс на CPU, либо нормализация вне autocast) — считаем
+        # одним fused-опом: на декодировании каждый токен делает 33 таких
+        # нормализации, и шесть отдельных aten-вызовов на каждую стоят дороже,
+        # чем сама арифметика.
+        if (x.dtype == torch.float32 and self.weight.dtype == torch.float32
+                and not torch.jit.is_tracing()):
+            # при экспорте в ONNX остаёмся на формуле ниже: aten::rms_norm
+            # не поддерживается экспортером
+            return F.rms_norm(x, (x.shape[-1],), self.weight, self.eps)
+        # под autocast (bf16) вручную и строго в fp32: иначе на длинном
+        # контексте точности не хватает
         dt = x.dtype
         xf = x.float()
         xf = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.eps)
@@ -60,13 +71,38 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.T
     Арифметика делается в fp32: на bf16 вращение быстро теряет точность.
     """
     dt = x.dtype
-    xf = x.float()
+    # приведение к fp32 пропускаем, если оно и так fp32: .float()/.to() на
+    # каждом токене — это лишние aten-вызовы, а их на декодировании сотни
+    xf = x if dt == torch.float32 else x.float()
     x1 = xf[..., : xf.shape[-1] // 2]
     x2 = xf[..., xf.shape[-1] // 2:]
     rotated = torch.cat((-x2, x1), dim=-1)
-    cos = cos.float().unsqueeze(0).unsqueeze(0)  # (1,1,T,hd)
-    sin = sin.float().unsqueeze(0).unsqueeze(0)
-    return (xf * cos + rotated * sin).to(dt)
+    cos = cos if cos.dtype == torch.float32 else cos.float()
+    sin = sin if sin.dtype == torch.float32 else sin.float()
+    out = xf * cos[None, None] + rotated * sin[None, None]   # (1,1,T,hd)
+    return out if dt == torch.float32 else out.to(dt)
+
+
+_GQA_OK: Optional[bool] = None
+
+
+def _sdpa_supports_gqa() -> bool:
+    """Поддерживает ли установленный torch enable_gqa (появился в 2.5).
+
+    Проверяем один раз реальным вызовом: на старых версиях и на части бэкендов
+    параметр либо отсутствует, либо падает, и тогда остаёмся на
+    repeat_interleave.
+    """
+    global _GQA_OK
+    if _GQA_OK is None:
+        try:
+            q = torch.zeros(1, 4, 2, 8)
+            k = torch.zeros(1, 2, 2, 8)
+            F.scaled_dot_product_attention(q, k, k, enable_gqa=True)
+            _GQA_OK = True
+        except Exception:
+            _GQA_OK = False
+    return _GQA_OK
 
 
 class Attention(nn.Module):
@@ -127,21 +163,27 @@ class Attention(nn.Module):
             k = k.expand(B, self.n_kv, past + T, self.hd)
             v = v.expand(B, self.n_kv, past + T, self.hd)
 
-        if self.n_rep > 1:  # GQA -> повторяем k/v под число q-голов
+        # GQA: вместо физического повторения k/v (repeat_interleave копирует
+        # тензор на каждом токене) просим SDPA самому развернуть группы.
+        drop_p = self.cfg.dropout if self.training else 0.0
+        gqa = (self.n_rep > 1 and _sdpa_supports_gqa()
+               and not torch.jit.is_tracing())   # экспортер ONNX не знает enable_gqa
+        if self.n_rep > 1 and not gqa:
             k = k.repeat_interleave(self.n_rep, dim=1)
             v = v.repeat_interleave(self.n_rep, dim=1)
-
-        drop_p = self.cfg.dropout if self.training else 0.0
         if attn_mask is not None:
-            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, dropout_p=drop_p)
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask,
+                                               dropout_p=drop_p, enable_gqa=gqa)
         elif cache is None:
             # весь фрагмент виден сразу: причинность даёт is_causal (быстрый путь)
-            y = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=drop_p)
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=True,
+                                               dropout_p=drop_p, enable_gqa=gqa)
         else:
             # шаг генерации: все ключи в кэше уже в прошлом, маска не нужна.
             # is_causal=True здесь использовать НЕЛЬЗЯ: при T_q=1 и T_kv>1
             # он оставляет видимым только самый первый ключ.
-            y = F.scaled_dot_product_attention(q, k, v, dropout_p=drop_p)
+            y = F.scaled_dot_product_attention(q, k, v, dropout_p=drop_p,
+                                               enable_gqa=gqa)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         return self.resid_drop(self.c_proj(y))
 

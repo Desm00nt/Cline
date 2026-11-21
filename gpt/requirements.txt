@@ -1,3 +1,7 @@
 torch>=2.0
 numpy>=1.24
 pytest>=7.0  # только для тестов
+
+# ускорение инференса в ~4.8x (fused-граф + int8), см. scripts/bench_decode.py --ort
+onnx>=1.16
+onnxruntime>=1.18
