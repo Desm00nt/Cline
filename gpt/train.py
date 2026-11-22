@@ -242,7 +242,11 @@ def main():
     # ---------------- цикл ----------------
     model.train()
     it = infinite(train_loader)
-    t0 = time.time()
+    # time.monotonic(), а не time.time(): настенные часы продолжают идти, когда
+    # процесс приостановлен (снепшот среды, пауза контейнера), и tok/с за такой
+    # интервал получается занижен в разы. Замерено: интервал, целиком прошедший
+    # внутри одной сессии, даёт 1600-1760 ток/с, а интервал через паузу — 175.
+    t0 = time.monotonic()
     running, n_seen = 0.0, 0
     tokens_since_log = 0
 
@@ -277,13 +281,13 @@ def main():
         tokens_since_log += tokens_per_step
 
         if (step + 1) % args.log_every == 0 or step == step0:
-            dt = time.time() - t0
+            dt = time.monotonic() - t0
             tps = tokens_since_log / max(1e-9, dt)
             print(f"[шаг {step+1}/{args.steps}] loss={running/n_seen:.4f} "
                   f"lr={args.lr*mult:.2e} |g|={float(grad_norm):.2f} "
                   f"{tps:,.0f} ток/с" + (f" MFU={raw_model.estimate_mfu(tps, 'cuda')*100:.1f}%"
                                         if device == 'cuda' else ""), flush=True)
-            running, n_seen, t0, tokens_since_log = 0.0, 0, time.time(), 0
+            running, n_seen, t0, tokens_since_log = 0.0, 0, time.monotonic(), 0
 
         if (step + 1) % args.eval_every == 0 or step + 1 == args.steps:
             val = evaluate(raw_model, val_loader, device, args.eval_batches, amp_dtype)
