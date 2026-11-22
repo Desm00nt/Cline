@@ -288,3 +288,44 @@ def test_short_block_forward_uses_mask_free_path():
             h = blk(h, cos, sin, None, mask)
         ref = model.head(model.ln_f(h))
     assert (fast - ref).abs().max().item() < 1e-5
+
+
+def test_load_any_respects_best_source(tmp_path):
+    """load_any обязан брать те веса, которые eval признал лучшими.
+
+    В начале прогона EMA ещё не разошлась и хуже raw; брать её «по умолчанию»
+    значило бы молча подставить в чат худшую модель.
+    """
+    from minigpt.model import load_any
+
+    torch.manual_seed(5)
+    model = GPT(tiny_cfg())
+    raw = {k: v.clone() for k, v in model.state_dict().items()}
+    shadow = {k: torch.randn_like(v) for k, v in raw.items()}
+    path = str(tmp_path / "ckpt.pt")
+
+    for source, expect_ema in [("raw", False), ("ema", True)]:
+        torch.save({"config": model.cfg.to_dict(), "model": raw,
+                    "ema": {"shadow": shadow}, "best_source": source}, path)
+        got, payload = load_any(path)
+        assert payload["best_source"] == source
+        # ключ берём несвязанный: tok_emb.weight и head.weight при tie_weights —
+        # один тензор, и в state_dict он встречается дважды
+        key = "ln_f.weight"
+        ref = shadow[key] if expect_ema else raw[key]
+        assert torch.equal(got.state_dict()[key], ref), source
+
+
+def test_load_any_without_best_source_prefers_ema(tmp_path):
+    """Старые чекпойнты без best_source — прежнее поведение, берём EMA."""
+    from minigpt.model import load_any
+
+    torch.manual_seed(6)
+    model = GPT(tiny_cfg())
+    raw = {k: v.clone() for k, v in model.state_dict().items()}
+    shadow = {k: torch.randn_like(v) for k, v in raw.items()}
+    path = str(tmp_path / "old.pt")
+    torch.save({"config": model.cfg.to_dict(), "model": raw,
+                "ema": {"shadow": shadow}}, path)
+    got, _ = load_any(path)
+    assert torch.equal(got.state_dict()["ln_f.weight"], shadow["ln_f.weight"])

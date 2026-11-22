@@ -416,14 +416,18 @@ class GPT(nn.Module):
 def load_any(path: str, device: str = "cpu", prefer_ema: bool = True):
     """Загружает и чекпойнт обучения, и чистый {'config','model'}.
 
-    Если в чекпойнте есть EMA-веса, берём их — они почти всегда лучше.
+    Какие веса брать — решает `best_source`, который записал train.py по
+    результату eval: в начале прогона EMA ещё не разошлась и бывает хуже raw
+    (замер на шаге 2000: raw 3.4737 против ema 3.5599). Если `best_source`
+    в чекпойнте нет, берём EMA — на длинных прогонах она почти всегда лучше.
     """
     payload = torch.load(path, map_location="cpu", weights_only=False)
     cfg = GPTConfig.from_dict(payload["config"])
     model = GPT(cfg)
     if "model" in payload:
         model.load_state_dict(payload["model"])
-    ema = payload.get("ema") if prefer_ema else None
+    want_ema = prefer_ema and payload.get("best_source", "ema") != "raw"
+    ema = payload.get("ema") if want_ema else None
     if ema:
         sd = model.state_dict()
         for k, v in ema["shadow"].items():
