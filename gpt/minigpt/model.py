@@ -136,6 +136,7 @@ class Attention(nn.Module):
         sin: torch.Tensor,
         cache: Optional["KVCache"] = None,
         attn_mask: Optional[torch.Tensor] = None,
+        slot: Optional[int] = None,   # слот KV-кэша: при n_loop>1 != layer_idx
     ) -> torch.Tensor:
         B, T, C = x.shape
         # QK-Norm применяется ПО ГОЛОВАМ (последняя ось = head_dim),
@@ -157,9 +158,12 @@ class Attention(nn.Module):
             past = cache.length
             # кэш хранится как (max_len, n_kv, hd) — пишем чанк и берём весь хвост,
             # включая только что добавленные токены (cache.advance будет позже)
-            cache.append(self.layer_idx, k.squeeze(0).transpose(0, 1), v.squeeze(0).transpose(0, 1))
-            k = cache.get_k(self.layer_idx, past + T).unsqueeze(0).transpose(1, 2)
-            v = cache.get_v(self.layer_idx, past + T).unsqueeze(0).transpose(1, 2)
+            # slot != layer_idx при n_loop > 1: один и тот же блок применяется
+            # несколько раз, и каждому применению нужен свой кэш
+            cs = self.layer_idx if slot is None else slot
+            cache.append(cs, k.squeeze(0).transpose(0, 1), v.squeeze(0).transpose(0, 1))
+            k = cache.get_k(cs, past + T).unsqueeze(0).transpose(1, 2)
+            v = cache.get_v(cs, past + T).unsqueeze(0).transpose(1, 2)
             k = k.expand(B, self.n_kv, past + T, self.hd)
             v = v.expand(B, self.n_kv, past + T, self.hd)
 
@@ -209,8 +213,8 @@ class Block(nn.Module):
         self.ln_2 = RMSNorm(cfg.n_embd)
         self.mlp = MLP(cfg)
 
-    def forward(self, x, cos, sin, cache=None, attn_mask=None):
-        x = x + self.attn(self.ln_1(x), cos, sin, cache, attn_mask)
+    def forward(self, x, cos, sin, cache=None, attn_mask=None, slot=None):
+        x = x + self.attn(self.ln_1(x), cos, sin, cache, attn_mask, slot)
         x = x + self.mlp(self.ln_2(x))
         return x
 
@@ -319,9 +323,11 @@ class GPT(nn.Module):
         else:
             swa_mask = None
 
-        for block in self.blocks:
-            mask = global_mask if block.attn.global_layer else swa_mask
-            x = block(x, cos, sin, cache, mask)
+        n_loop = max(1, self.cfg.n_loop)
+        for loop in range(n_loop):
+            for i, block in enumerate(self.blocks):
+                mask = global_mask if block.attn.global_layer else swa_mask
+                x = block(x, cos, sin, cache, mask, loop * len(self.blocks) + i)
 
         if cache is not None:
             cache.advance(T)

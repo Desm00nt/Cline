@@ -12,7 +12,7 @@ from .tokenizer import EOS_ID, END_ID
 
 
 def make_cache(model: GPT, device, dtype=torch.float32) -> KVCache:
-    return KVCache(model.cfg.n_layer, model.cfg.block_size, model.cfg.n_kv_head,
+    return KVCache(model.cfg.cache_slots(), model.cfg.block_size, model.cfg.n_kv_head,
                    model.cfg.head_dim(), device=device, dtype=dtype)
 
 

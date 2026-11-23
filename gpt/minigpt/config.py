@@ -31,6 +31,16 @@ class GPTConfig:
     z_loss: float = 0.0            # штраф на logsumexp логитов (стабильность bf16)
     residual_scale_init: bool = True  # делить init выходных проекций на sqrt(2*L)
     init_std: float = 0.02
+    # Рекурсивная глубина: сколько раз прогнать ПО ОДНИМ И ТЕМ ЖЕ блокам.
+    # n_layer=2, n_loop=3 даёт 6 применений слоя при параметрах двух блоков:
+    # глубина растёт, веса — нет. Плата: во столько же раз больше FLOPs на токен
+    # против n_layer=2, и отдельный KV-слот на каждое применение (иначе кэш
+    # второго прохода перезапишет первый и генерация поедет).
+    n_loop: int = 1
+
+    def cache_slots(self) -> int:
+        """Сколько независимых KV-слотов нужно: по одному на применение блока."""
+        return self.n_layer * max(1, self.n_loop)
 
     def head_dim(self) -> int:
         assert self.n_embd % self.n_head == 0, "n_embd должно делиться на n_head"
@@ -71,6 +81,22 @@ PRESETS: Dict[str, GPTConfig] = {
         vocab_size=8192, block_size=1024,
         n_layer=6, n_head=6, n_kv_head=3, n_embd=384,
         sliding_window=512, global_every=3,
+    ),
+    # Рекурсивная глубина: те же 6 применений слоя, что у small, но блоками
+    # по два с тройным повтором. Параметров вдвое меньше (веса 25 МБ вместо
+    # 51 МБ) при том же числе FLOPs на токен — на CPU, где декодирование
+    # упирается в полосу памяти, это прямое ускорение.
+    "small-loop": GPTConfig(
+        vocab_size=8192, block_size=1024,
+        n_layer=2, n_head=6, n_kv_head=3, n_embd=384,
+        sliding_window=512, global_every=3, n_loop=3,
+    ),
+    # Ещё глубже без роста весов: 12 применений тех же двух блоков.
+    # Вдвое больше FLOPs на токен, зато проверяет, окупается ли глубина.
+    "small-loop-deep": GPTConfig(
+        vocab_size=8192, block_size=1024,
+        n_layer=2, n_head=6, n_kv_head=3, n_embd=384,
+        sliding_window=512, global_every=3, n_loop=6,
     ),
     # Флагман: ~29.9M параметров, контекст 4k. Основной пресет под задачу.
     # Словарь 12288 — компромисс: больше словарь = лучше сжатие русского
