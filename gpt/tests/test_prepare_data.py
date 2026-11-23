@@ -48,6 +48,20 @@ def test_iter_docs_strips_and_drops_empty(tmp_path):
     assert list(iter_docs(str(p), "\n\n")) == ["первый", "второй"]
 
 
+def test_iter_docs_streams_across_chunk_boundary(tmp_path, monkeypatch):
+    """Разделитель может попасть ровно на границу куска чтения."""
+    import prepare_data
+    p = tmp_path / "a.txt"
+    text = "мама мыла раму\n\n" + ("окно было светлое и большое\n\n" * 50) + "хвост"
+    p.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(prepare_data, "READ_CHUNK", 7)
+    streamed = list(prepare_data.iter_docs(str(p), "\n\n"))
+    monkeypatch.setattr(prepare_data, "READ_CHUNK", 1 << 20)
+    whole = list(prepare_data.iter_docs(str(p), "\n\n"))
+    assert streamed == whole == [t.strip() for t in text.split("\n\n") if t.strip()]
+    assert streamed[-1] == "хвост"
+
+
 def test_encode_stream_appends_eos_and_tracks_boundaries(tmp_path):
     tok = make_tiny_tokenizer()
     docs = tmp_path / "a.txt"

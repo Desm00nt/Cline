@@ -31,6 +31,7 @@ from minigpt.tokenizer import BPETokenizer
 TEXT_EXT = (".txt", ".md", ".jsonl")
 EOS_ID = 2
 COPY_CHUNK = 1 << 22  # 4 МБ на шаг копирования
+READ_CHUNK = 1 << 20  # 1M символов на шаг чтения corpus.txt
 
 
 def parse_args():
@@ -72,13 +73,28 @@ def list_files(path: str, exclude: str = "") -> List[Tuple[str, int]]:
 
 
 def iter_docs(path: str, doc_sep: str) -> Iterator[str]:
-    """Документы одного файла, без загрузки всего корпуса в память."""
+    """Документы одного файла, без загрузки всего файла в память.
+
+    corpus.txt у novaya_gazeta — 590M символов: fh.read() плюс split() дают
+    ~2.4 ГБ и падают в MemoryError на машине с 4 ГБ RAM. Читаем кусками, хвост
+    переносим в следующий (разделитель может попасть на границу куска).
+    """
     with open(path, "r", encoding="utf-8", errors="replace") as fh:
-        text = fh.read()
-    for part in text.split(doc_sep):
-        part = part.strip()
-        if part:
-            yield part
+        buf = ""
+        while True:
+            chunk = fh.read(READ_CHUNK)
+            if not chunk:
+                break
+            buf += chunk
+            parts = buf.split(doc_sep)
+            buf = parts.pop()          # последний кусок может быть неполным
+            for part in parts:
+                part = part.strip()
+                if part:
+                    yield part
+    part = buf.strip()
+    if part:
+        yield part
 
 
 def collect_docs(path: str, doc_sep: str, exclude: str = "") -> List[str]:
