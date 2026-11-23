@@ -205,7 +205,8 @@ def main():
         "vocab_size": tok.vocab_size, "num_merges": args.num_merges,
         "train_tokens": n_train, "val_tokens": n_val,
         "docs": len(ends),
-        "chars_per_token": (total_bytes / max(1, total)),
+        # именно байт на токен: размер файла в UTF-8, а не число символов
+        "bytes_per_token": round(total_bytes / max(1, total), 3),
         "dtype": np.dtype(dtype).name,
         "encode_seconds": round(dt, 1),
         "tokens_per_second": round(total / max(dt, 1e-9)),
