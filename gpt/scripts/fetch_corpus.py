@@ -126,7 +126,12 @@ def main():
         if name not in SOURCES:
             raise SystemExit(f"неизвестный источник {name!r}: {sorted(SOURCES)}")
         outdir = os.path.join(args.out, name)
-        os.makedirs(outdir, exist_ok=True)
+        # corpus.txt — для prepare_data (один большой файл).
+        # docs/ — по файлу на документ: внутри документа пустые строки тоже
+        # встречаются, поэтому по одному только corpus.txt границу документа
+        # восстановить нельзя, а для построения SFT-пар она нужна.
+        docsdir = os.path.join(outdir, "docs")
+        os.makedirs(docsdir, exist_ok=True)
         total_chars = kept = 0
         with open(os.path.join(outdir, "corpus.txt"), "w", encoding="utf-8") as out:
             for fname, text in iter_tar(SOURCES[name]["url"], SOURCES[name]["patterns"],
@@ -136,6 +141,9 @@ def main():
                     continue
                 out.write(cleaned)
                 out.write("\n\n")           # разделитель документов
+                with open(os.path.join(docsdir, f"{kept:06d}.txt"), "w",
+                          encoding="utf-8") as df:
+                    df.write(cleaned)
                 total_chars += len(cleaned)
                 kept += 1
                 if kept % 500 == 0:
