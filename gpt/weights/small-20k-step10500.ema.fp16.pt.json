@@ -1,0 +1,6 @@
+{
+  "out": "/tmp/snap.fp16.pt",
+  "bytes": 32080345,
+  "step": 10500,
+  "best_source": "ema"
+}
