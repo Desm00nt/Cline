@@ -1,4 +1,4 @@
-"""Тесты подготовки данных: потоковое кодирование и граница train/val."""
+"""Тесты подготовки данных: потоковое кодирование и разрез train/val."""
 
 import json
 import os
@@ -10,7 +10,8 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 
-from prepare_data import EOS_ID, copy_range, encode_stream, iter_docs, list_files  # noqa: E402
+import prepare_data as PD  # noqa: E402
+from prepare_data import EOS_ID, encode_stream, iter_docs, list_files  # noqa: E402
 from minigpt.tokenizer import BPETokenizer  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,13 +24,6 @@ def make_tiny_tokenizer():
     return BPETokenizer.train(texts, 20, verbose=False)
 
 
-def write_corpus(root, docs_per_file=2, files=3):
-    for i in range(files):
-        (root / f"{i:03d}.txt").write_text(
-            "\n\n".join([f"документ {i}-{j} про раму и окно" for j in range(docs_per_file)]),
-            encoding="utf-8")
-
-
 def test_list_files_skips_docs_subdir(tmp_path):
     """fetch_corpus пишет и corpus.txt, и docs/ — иначе корпус удваивается."""
     (tmp_path / "corpus.txt").write_text("текст", encoding="utf-8")
@@ -38,8 +32,7 @@ def test_list_files_skips_docs_subdir(tmp_path):
     kept = [f for f, _ in list_files(str(tmp_path), "/docs/")]
     assert len(kept) == 1
     assert kept[0].endswith("corpus.txt")
-    both = [f for f, _ in list_files(str(tmp_path), "")]
-    assert len(both) == 2
+    assert len(list_files(str(tmp_path), "")) == 2
 
 
 def test_iter_docs_strips_and_drops_empty(tmp_path):
@@ -50,63 +43,82 @@ def test_iter_docs_strips_and_drops_empty(tmp_path):
 
 def test_iter_docs_streams_across_chunk_boundary(tmp_path, monkeypatch):
     """Разделитель может попасть ровно на границу куска чтения."""
-    import prepare_data
     p = tmp_path / "a.txt"
     text = "мама мыла раму\n\n" + ("окно было светлое и большое\n\n" * 50) + "хвост"
     p.write_text(text, encoding="utf-8")
-    monkeypatch.setattr(prepare_data, "READ_CHUNK", 7)
-    streamed = list(prepare_data.iter_docs(str(p), "\n\n"))
-    monkeypatch.setattr(prepare_data, "READ_CHUNK", 1 << 20)
-    whole = list(prepare_data.iter_docs(str(p), "\n\n"))
+    monkeypatch.setattr(PD, "READ_CHUNK", 7)
+    streamed = list(PD.iter_docs(str(p), "\n\n"))
+    monkeypatch.setattr(PD, "READ_CHUNK", 1 << 20)
+    whole = list(PD.iter_docs(str(p), "\n\n"))
     assert streamed == whole == [t.strip() for t in text.split("\n\n") if t.strip()]
     assert streamed[-1] == "хвост"
 
 
-def test_encode_stream_appends_eos_and_tracks_boundaries(tmp_path):
+def test_encode_stream_splits_documents(tmp_path):
     tok = make_tiny_tokenizer()
-    docs = tmp_path / "a.txt"
-    docs.write_text("мама мыла раму\n\nокно было светлое", encoding="utf-8")
-    tmp_bin = str(tmp_path / "all.bin")
-    total, ends = encode_stream([str(docs)], "\n\n", tok, tmp_bin, np.uint16)
-    assert len(ends) == 2
-    assert ends[-1] == total
-    data = np.fromfile(tmp_bin, dtype=np.uint16)
-    assert data.size == total
-    # каждый документ заканчивается EOS
-    assert data[ends[0] - 1] == EOS_ID
-    assert data[ends[1] - 1] == EOS_ID
+    src = tmp_path / "a.txt"
+    docs = ["мама мыла раму и окно"] * 200          # много документов -> val непустой
+    src.write_text("\n\n".join(docs), encoding="utf-8")
+    n_tr, n_va, ndocs = encode_stream([str(src)], "\n\n", tok,
+                                      str(tmp_path / "tr.bin"), str(tmp_path / "va.bin"),
+                                      np.uint16, val_frac=0.2, seed=7)
+    assert ndocs == 200
+    assert n_tr > 0 and n_va > 0
+    assert n_tr + n_va == ndocs * (len(tok.encode(docs[0])) + 1)
+    for name in ("tr.bin", "va.bin"):
+        data = np.fromfile(str(tmp_path / name), dtype=np.uint16)
+        assert data.size > 0
+        assert data[-1] == EOS_ID, "файл должен заканчиваться границей документа"
 
 
-def test_copy_range_preserves_tokens(tmp_path):
-    src = tmp_path / "src.bin"
-    arr = np.arange(1000, dtype=np.uint16)
-    arr.tofile(str(src))
-    dst = str(tmp_path / "dst.bin")
-    n = copy_range(str(src), dst, 300, 900, 2)
-    assert n == 600
-    assert np.array_equal(np.fromfile(dst, dtype=np.uint16), arr[300:900])
+def test_val_is_not_just_the_tail_of_the_stream(tmp_path):
+    """Регрессия: хвостовой разрез отдавал в val последний источник целиком.
 
-
-def test_train_val_split_lands_on_document_boundary(tmp_path):
-    """Val не должен начинаться с середины документа: иначе валидация подсматривает."""
+    На реальном корпусе это означало val из одних романов при train на 93% из
+    новостей, и валидация показывала смену домена вместо качества модели.
+    """
     src = tmp_path / "raw"
-    src.mkdir()
-    write_corpus(src)
+    for sub, marker in (("a_news", "новости про заседание и отчёт"),
+                        ("z_novels", "роман про любовь и дуэль")):
+        d = src / sub
+        d.mkdir(parents=True)
+        for i in range(40):
+            (d / f"{i:03d}.txt").write_text(
+                "\n\n".join([f"{marker} часть {j} " + "слов побольше " * 8
+                             for j in range(3)]), encoding="utf-8")
     out = tmp_path / "prepared"
     r = subprocess.run(
         [PY, os.path.join(HERE, "..", "scripts", "prepare_data.py"),
          "--input", str(src), "--out", str(out), "--num-merges", "20",
-         "--val-frac", "0.3", "--max-train-chars", "2000"],
+         "--val-frac", "0.3", "--max-train-chars", "4000", "--seed", "11"],
         capture_output=True, text=True, timeout=600)
     assert r.returncode == 0, r.stderr[-2000:]
     meta = json.loads((out / "meta.json").read_text(encoding="utf-8"))
-    assert meta["train_tokens"] + meta["val_tokens"] >= 2 * meta["docs"]
-    train = np.fromfile(str(out / "train.bin"), dtype=np.uint16)
-    val = np.fromfile(str(out / "val.bin"), dtype=np.uint16)
-    assert train.size == meta["train_tokens"]
-    assert val.size == meta["val_tokens"] > 0
-    # последний токен train — EOS: разрез ровно по границе документа
-    assert train[-1] == EOS_ID
-    assert val[-1] == EOS_ID
-    # временный файл убран
+    assert meta["val_tokens"] > 0
     assert not (out / "all_tokens.tmp.bin").exists()
+
+    tok = BPETokenizer.load(str(out / "tokenizer.json"))
+    val = np.fromfile(str(out / "val.bin"), dtype=np.uint16)
+    text = tok.decode(val.tolist())
+    assert "новости" in text, "в val должны попасть документы из первого источника"
+    assert "роман" in text, "в val должны попасть документы из второго источника"
+
+
+def test_reused_tokenizer_gives_same_vocab(tmp_path):
+    """--tokenizer обязателен при дообучении: новый словарь сломает эмбеддинги."""
+    src = tmp_path / "raw"
+    src.mkdir()
+    (src / "a.txt").write_text("мама мыла раму и окно\n\nокно смотрело на реку",
+                               encoding="utf-8")
+    tok = make_tiny_tokenizer()
+    tok.save(str(tmp_path / "tok.json"))
+    out = tmp_path / "prepared"
+    r = subprocess.run(
+        [PY, os.path.join(HERE, "..", "scripts", "prepare_data.py"),
+         "--input", str(src), "--out", str(out), "--tokenizer", str(tmp_path / "tok.json"),
+         "--val-frac", "0.0"],
+        capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0, r.stderr[-2000:]
+    meta = json.loads((out / "meta.json").read_text(encoding="utf-8"))
+    assert meta["vocab_size"] == tok.vocab_size
+    assert "учим токенайзер" not in r.stdout

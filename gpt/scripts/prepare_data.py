@@ -44,6 +44,11 @@ def parse_args():
     p.add_argument("--max-train-chars", type=int, default=3_000_000,
                    help="сколько символов взять на обучение токенайзера (для скорости)")
     p.add_argument("--doc-sep", default="\n\n", help="разделитель документов внутри файла")
+    p.add_argument("--tokenizer", default="",
+                   help="взять готовый tokenizer.json вместо обучения. Обязательно "
+                        "при подготовке данных под существующий чекпойнт: новый "
+                        "словарь не совпадёт с выученными эмбеддингами")
+    p.add_argument("--seed", type=int, default=1337, help="зерно разреза train/val")
     p.add_argument("--exclude", default="/docs/",
                    help="подстрока пути, которую пропускаем. По умолчанию /docs/: "
                         "fetch_corpus.py пишет и corpus.txt, и docs/ с теми же "
@@ -130,37 +135,41 @@ def sample_for_tokenizer(files: List[Tuple[str, int]], doc_sep: str,
 
 
 def encode_stream(files: Iterable[str], doc_sep: str, tok: BPETokenizer,
-                  tmp_path: str, dtype) -> Tuple[int, array]:
-    """Пишет токены в tmp_path, возвращает (всего токенов, границы документов)."""
-    ends = array("q")
-    total = 0
-    with open(tmp_path, "wb") as out:
+                  train_path: str, val_path: str, dtype,
+                  val_frac: float = 0.05, seed: int = 1337) -> Tuple[int, int, int]:
+    """Кодирует и сразу режет: каждый документ целиком уходит в train или в val.
+
+    Разрез именно по документу и именно случайный. Прежний вариант резал хвост
+    потока, а файлы обходятся по алфавиту, поэтому в val попадал последний
+    источник целиком: так валидация состояла только из романов при train на 93%
+    из новостей и измеряла смену домена, а не качество модели (ppl 21.2 на
+    романах против 12.5 на новостях у одного и того же чекпойнта).
+
+    Возвращает (токенов в train, токенов в val, документов).
+    """
+    rng = np.random.default_rng(seed)
+    n_train = n_val = docs = 0
+    with open(train_path, "wb") as ftr, open(val_path, "wb") as fva:
+        buf_tr, buf_va = bytearray(), bytearray()
         for f in files:
             for doc in iter_docs(f, doc_sep):
                 ids = tok.encode(doc)
                 if not ids:
                     continue
                 arr = np.asarray(ids + [EOS_ID], dtype=dtype)
-                out.write(arr.tobytes())
-                total += arr.size
-                ends.append(total)
-    if total == 0:
+                if val_frac > 0 and rng.random() < val_frac:
+                    buf_va += arr.tobytes()
+                    n_val += arr.size
+                else:
+                    buf_tr += arr.tobytes()
+                    n_train += arr.size
+                docs += 1
+            # сбрасываем раз в файл: иначе на корпус в гигабайт буфер не влезет
+            ftr.write(buf_tr); fva.write(buf_va)
+            buf_tr.clear(); buf_va.clear()
+    if n_train == 0:
         raise SystemExit("не удалось закодировать ни одного документа")
-    return total, ends
-
-
-def copy_range(src: str, dst: str, start: int, stop: int, itemsize: int) -> int:
-    """Копирует токены [start, stop) кусками, без чтения всего файла в память."""
-    with open(src, "rb") as fi, open(dst, "wb") as fo:
-        fi.seek(start * itemsize)
-        left = (stop - start) * itemsize
-        while left > 0:
-            buf = fi.read(min(COPY_CHUNK, left))
-            if not buf:
-                break
-            fo.write(buf)
-            left -= len(buf)
-    return stop - start
+    return n_train, n_val, docs
 
 
 def main():
@@ -170,41 +179,37 @@ def main():
     total_bytes = sum(s for _, s in files)
     print(f"файлов: {len(files)} ({total_bytes/1e6:.1f} МБ), пропускаем {args.exclude!r}")
 
-    # 1) токенайзер — на случайной выборке, чтобы не ждать на больших корпусах
-    sample, taken = sample_for_tokenizer(files, args.doc_sep, args.max_train_chars)
-    t0 = time.time()
-    print(f"учим токенайзер на {taken:,} символах ({len(sample)} документов)...")
-    tok = BPETokenizer.train(sample, args.num_merges)
-    print(f"  время: {time.time()-t0:.1f} c, словарь: {tok.vocab_size}")
+    # 1) токенайзер — переиспользуем готовый либо учим на случайной выборке
+    if args.tokenizer:
+        tok = BPETokenizer.load(args.tokenizer)
+        print(f"взят готовый токенайзер {args.tokenizer}: словарь {tok.vocab_size}")
+    else:
+        sample, taken = sample_for_tokenizer(files, args.doc_sep, args.max_train_chars)
+        t0 = time.time()
+        print(f"учим токенайзер на {taken:,} символах ({len(sample)} документов)...")
+        tok = BPETokenizer.train(sample, args.num_merges)
+        print(f"  время: {time.time()-t0:.1f} c, словарь: {tok.vocab_size}")
     tok.save(os.path.join(args.out, "tokenizer.json"))
 
-    # 2) кодируем потоково во временный файл
+    # 2) кодируем потоково, документ целиком уходит в train или в val
     dtype = token_dtype(tok.vocab_size)
-    tmp_path = os.path.join(args.out, "all_tokens.tmp.bin")
     print("кодируем корпус...")
     t0 = time.time()
-    total, ends = encode_stream((f for f, _ in files), args.doc_sep, tok, tmp_path, dtype)
+    n_train, n_val, docs = encode_stream(
+        (f for f, _ in files), args.doc_sep, tok,
+        os.path.join(args.out, "train.bin"), os.path.join(args.out, "val.bin"),
+        dtype, args.val_frac, args.seed)
     dt = time.time() - t0
+    total = n_train + n_val
     print(f"  токенов: {total:,} за {dt:.1f} c ({total/max(dt,1e-9):,.0f} ток/с)")
 
-    # 3) режем по границе документа, ближайшей к (1 - val_frac)
-    itemsize = np.dtype(dtype).itemsize
-    if args.val_frac > 0:
-        ends_np = np.frombuffer(ends.tobytes(), dtype=np.int64)
-        idx = int(np.searchsorted(ends_np, int(total * (1 - args.val_frac))))
-        cut = int(ends[idx]) if idx < len(ends) else total
-    else:
-        cut = total
-    n_train = copy_range(tmp_path, os.path.join(args.out, "train.bin"), 0, cut, itemsize)
-    n_val = 0
-    if cut < total:
-        n_val = copy_range(tmp_path, os.path.join(args.out, "val.bin"), cut, total, itemsize)
-    os.remove(tmp_path)
-
     meta = {
-        "vocab_size": tok.vocab_size, "num_merges": args.num_merges,
+        "vocab_size": tok.vocab_size,
+        # не args.num_merges: при --tokenizer словарь взят готовый, и аргумент
+        # к нему отношения не имеет
+        "num_merges": len(getattr(tok, "merges", [])) or args.num_merges,
         "train_tokens": n_train, "val_tokens": n_val,
-        "docs": len(ends),
+        "docs": docs, "val_frac": args.val_frac, "seed": args.seed,
         # именно байт на токен: размер файла в UTF-8, а не число символов
         "bytes_per_token": round(total_bytes / max(1, total), 3),
         "dtype": np.dtype(dtype).name,
