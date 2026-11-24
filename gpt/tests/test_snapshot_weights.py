@@ -112,3 +112,27 @@ def test_clean_export_without_ema(tmp_path):
         raise AssertionError("ожидали SystemExit")
     except SystemExit:
         pass
+
+
+def test_snapshot_can_copy_tokenizer(tmp_path):
+    """Снапшот весов без словаря не читается: токенайзер кладётся рядом.
+
+    Регрессия: прогон на 20 000 шагов пропал, потому что tokenizer.json лежал
+    в gpt/data/prepared_real/ (в .gitignore) и откат среды его стёр.
+    """
+    cfg = tiny_cfg()
+    torch.manual_seed(0)
+    model = GPT(cfg)
+    src = str(tmp_path / "ckpt.pt")
+    torch.save({"config": asdict(cfg), "model": model.state_dict()}, src)
+    tok_src = tmp_path / "tokenizer.json"
+    tok_src.write_text('{"version": 1, "special": [], "merges": []}', encoding="utf-8")
+    outdir = tmp_path / "weights"
+    outdir.mkdir()
+    info = snapshot(src, str(outdir / "snap.fp16.pt"), tokenizer=str(tok_src))
+    assert info["tokenizer"] == str(outdir / "tokenizer.json")
+    assert os.path.exists(info["tokenizer"])
+    assert open(info["tokenizer"], encoding="utf-8").read() == tok_src.read_text(encoding="utf-8")
+    # без --tokenizer поля нет и файл не создаётся
+    info2 = snapshot(src, str(outdir / "snap2.fp16.pt"))
+    assert info2["tokenizer"] == ""

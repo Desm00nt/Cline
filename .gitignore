@@ -17,3 +17,8 @@ gpt/data/raw_real/
 gpt/data/rag_index*.json
 __pycache__/
 .pytest_cache/
+
+# gpt: сырые и подготовленные данные (сотни МБ) — не в git
+# ВАЖНО: weights/tokenizer.json в git обязан быть, иначе веса не читаются
+gpt/data/raw_balanced/
+gpt/data/prepared_balanced/

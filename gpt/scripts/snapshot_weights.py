@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 
 import torch
@@ -28,7 +29,8 @@ def to_fp16(state: dict) -> dict:
     return {k: (v.half() if torch.is_floating_point(v) else v) for k, v in state.items()}
 
 
-def snapshot(ckpt_path: str, out_path: str, ema_only: bool = False) -> dict:
+def snapshot(ckpt_path: str, out_path: str, ema_only: bool = False,
+             tokenizer: str = "") -> dict:
     payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if "model" not in payload:
         raise SystemExit(f"{ckpt_path}: нет ключа 'model' — это не чекпойнт обучения")
@@ -51,12 +53,22 @@ def snapshot(ckpt_path: str, out_path: str, ema_only: bool = False) -> dict:
         snap.pop("model")
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     torch.save(snap, out_path)
+    # Токенайзер кладём рядом со снапшотом. Без него веса не читаются: BPE
+    # определяет, какой id у какого куска текста, и другой словарь превращает
+    # обученные эмбеддинги в шум (замер: ppl 1622 вместо 13.2). Словарь не
+    # восстанавливается из весов, а gpt/data/ в .gitignore — так пропал
+    # tokenizer.json прогона на 20 000 шагов.
+    tok_out = ""
+    if tokenizer:
+        tok_out = os.path.join(os.path.dirname(out_path) or ".", "tokenizer.json")
+        shutil.copyfile(tokenizer, tok_out)
     info = {
         "out": out_path,
         "bytes": os.path.getsize(out_path),
         "step": snap.get("step"),
         "best_source": snap["best_source"],
         "keys": sorted(snap),
+        "tokenizer": tok_out,
     }
     with open(out_path + ".json", "w", encoding="utf-8") as f:
         json.dump({k: v for k, v in info.items() if k != "keys"}, f, ensure_ascii=False, indent=2)
@@ -70,8 +82,11 @@ def main() -> None:
     p.add_argument("--out", required=True)
     p.add_argument("--ema-only", action="store_true",
                    help="только EMA: 13 МБ вместо 26 МБ")
+    p.add_argument("--tokenizer", default="",
+                   help="tokenizer.json из каталога данных: копируется рядом со "
+                        "снапшотом, иначе веса нечем прочитать после отката среды")
     args = p.parse_args()
-    info = snapshot(args.ckpt, args.out, args.ema_only)
+    info = snapshot(args.ckpt, args.out, args.ema_only, args.tokenizer)
     print(json.dumps(info, ensure_ascii=False, indent=2))
 
 

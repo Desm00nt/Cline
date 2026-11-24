@@ -2,5 +2,7 @@
   "out": "/tmp/snap.fp16.pt",
   "bytes": 32080345,
   "step": 10500,
-  "best_source": "ema"
+  "best_source": "ema",
+  "tokenizer": null,
+  "note": "tokenizer утрачен: пропал вместе с data/prepared_real (был в .gitignore)"
 }
