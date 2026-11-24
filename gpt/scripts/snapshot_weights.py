@@ -43,8 +43,10 @@ def snapshot(ckpt_path: str, out_path: str, ema_only: bool = False) -> dict:
     ema = payload.get("ema")
     if ema is not None:
         snap["ema"] = {"shadow": to_fp16(ema["shadow"]), "decay": ema.get("decay")}
-    elif not ema_only:
-        raise SystemExit(f"{ckpt_path}: нет EMA (--ema-only, чтобы снять только raw)")
+    elif ema_only:
+        raise SystemExit(f"{ckpt_path}: --ema-only, но EMA в файле нет")
+    # чистый экспорт {'config','model'} (model_final.pt) EMA не содержит —
+    # это нормально, снимаем только веса
     if ema_only:
         snap.pop("model")
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)

@@ -87,3 +87,28 @@ def test_raw_best_source_is_preserved(tmp_path):
     x = torch.randint(0, cfg.vocab_size, (1, 8))
     with torch.no_grad():
         assert torch.allclose(model(x)[0], ref(x)[0], atol=1e-5)
+
+
+def test_clean_export_without_ema(tmp_path):
+    """model_final.pt — это {'config','model'} без EMA, и это не ошибка."""
+    cfg = tiny_cfg()
+    torch.manual_seed(0)
+    model = GPT(cfg)
+    src = str(tmp_path / "model_final.pt")
+    torch.save({"config": asdict(cfg), "model": model.state_dict()}, src)
+    out = str(tmp_path / "snap.fp16.pt")
+    info = snapshot(src, out)
+    assert info["bytes"] < os.path.getsize(src)
+    loaded, _ = load_any(out)
+    ref = GPT(cfg)
+    ref.load_state_dict({k: v.half().float() for k, v in model.state_dict().items()})
+    ref.eval()
+    x = torch.randint(0, cfg.vocab_size, (1, 8))
+    with torch.no_grad():
+        assert torch.allclose(loaded(x)[0], ref(x)[0], atol=1e-5)
+    # а вот --ema-only на таком файле — ошибка
+    try:
+        snapshot(src, str(tmp_path / "bad.pt"), ema_only=True)
+        raise AssertionError("ожидали SystemExit")
+    except SystemExit:
+        pass

@@ -1,0 +1,6 @@
+{
+  "out": "weights/small-20k-final.fp16.pt",
+  "bytes": 32081084,
+  "step": null,
+  "best_source": "ema"
+}
