@@ -1,0 +1,7 @@
+{
+  "out": "weights/small-21k-step2000.fp16.pt",
+  "bytes": 32081367,
+  "step": 2000,
+  "best_source": "raw",
+  "tokenizer": "weights/tokenizer.json"
+}

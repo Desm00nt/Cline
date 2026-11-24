@@ -30,7 +30,7 @@ def to_fp16(state: dict) -> dict:
 
 
 def snapshot(ckpt_path: str, out_path: str, ema_only: bool = False,
-             tokenizer: str = "") -> dict:
+             tokenizer: str = "", source: str = "both") -> dict:
     payload = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     if "model" not in payload:
         raise SystemExit(f"{ckpt_path}: нет ключа 'model' — это не чекпойнт обучения")
@@ -42,15 +42,23 @@ def snapshot(ckpt_path: str, out_path: str, ema_only: bool = False,
         "val_loss": payload.get("best_val_loss", payload.get("val_loss")),
         "snapshot_of": os.path.basename(ckpt_path),
     }
+    # В git влезает ~32 МБ, а model+ema вместе дают 64 МБ, поэтому по
+    # умолчанию снимаем только лучший набор весов (best_source из чекпоинта).
     ema = payload.get("ema")
-    if ema is not None:
-        snap["ema"] = {"shadow": to_fp16(ema["shadow"]), "decay": ema.get("decay")}
-    elif ema_only:
-        raise SystemExit(f"{ckpt_path}: --ema-only, но EMA в файле нет")
+    if source in ("both", "ema"):
+        if ema is None:
+            if ema_only or source == "ema":
+                raise SystemExit(f"{ckpt_path}: просят EMA, но в файле её нет")
+        else:
+            snap["ema"] = {"shadow": to_fp16(ema["shadow"]), "decay": ema.get("decay")}
+    if source == "ema" and ema is not None:
+        snap.pop("model")
+    elif source == "raw":
+        snap.pop("ema", None)
     # чистый экспорт {'config','model'} (model_final.pt) EMA не содержит —
     # это нормально, снимаем только веса
     if ema_only:
-        snap.pop("model")
+        snap.pop("model", None)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     torch.save(snap, out_path)
     # Токенайзер кладём рядом со снапшотом. Без него веса не читаются: BPE
@@ -61,7 +69,8 @@ def snapshot(ckpt_path: str, out_path: str, ema_only: bool = False,
     tok_out = ""
     if tokenizer:
         tok_out = os.path.join(os.path.dirname(out_path) or ".", "tokenizer.json")
-        shutil.copyfile(tokenizer, tok_out)
+        if os.path.abspath(tokenizer) != os.path.abspath(tok_out):
+            shutil.copyfile(tokenizer, tok_out)
     info = {
         "out": out_path,
         "bytes": os.path.getsize(out_path),
@@ -82,11 +91,20 @@ def main() -> None:
     p.add_argument("--out", required=True)
     p.add_argument("--ema-only", action="store_true",
                    help="только EMA: 13 МБ вместо 26 МБ")
+    p.add_argument("--source", choices=("best", "raw", "ema", "both"), default="best",
+                   help="best = только лучший набор весов (32 МБ, влезает в git); "
+                        "both = model+ema (64 МБ)")
     p.add_argument("--tokenizer", default="",
                    help="tokenizer.json из каталога данных: копируется рядом со "
                         "снапшотом, иначе веса нечем прочитать после отката среды")
     args = p.parse_args()
-    info = snapshot(args.ckpt, args.out, args.ema_only, args.tokenizer)
+    source = args.source
+    if source == "best":
+        payload = torch.load(args.ckpt, map_location="cpu", weights_only=False)
+        source = "ema" if payload.get("best_source", "ema") != "raw" and payload.get("ema") else "raw"
+        if source == "ema" and payload.get("ema") is None:
+            source = "raw"
+    info = snapshot(args.ckpt, args.out, args.ema_only, args.tokenizer, source)
     print(json.dumps(info, ensure_ascii=False, indent=2))
 
 

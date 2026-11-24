@@ -136,3 +136,39 @@ def test_snapshot_can_copy_tokenizer(tmp_path):
     # без --tokenizer поля нет и файл не создаётся
     info2 = snapshot(src, str(outdir / "snap2.fp16.pt"))
     assert info2["tokenizer"] == ""
+
+
+def test_snapshot_single_source_fits_git(tmp_path):
+    """model+ema дают 64 МБ и не влезают в git: по умолчанию снимаем один набор."""
+    cfg = tiny_cfg()
+    torch.manual_seed(0)
+    model = GPT(cfg)
+    sd = model.state_dict()
+    src = str(tmp_path / "ckpt.pt")
+    torch.save({"config": asdict(cfg), "model": sd, "best_source": "raw",
+                "ema": {"shadow": {k: v.clone() for k, v in sd.items()}, "decay": 0.999}}, src)
+    best = snapshot(src, str(tmp_path / "best.fp16.pt"), source="best")
+    both = snapshot(src, str(tmp_path / "both.fp16.pt"), source="both")
+    assert best["bytes"] < both["bytes"]
+    assert best["bytes"] < 33 * 1024 * 1024
+    loaded, payload = load_any(str(tmp_path / "best.fp16.pt"))
+    assert payload["best_source"] == "raw"
+    x = torch.randint(0, cfg.vocab_size, (1, 8))
+    with torch.no_grad():
+        assert torch.allclose(loaded(x)[0], model.eval()(x)[0], atol=1e-2)
+    # --source ema снимает EMA и не оставляет model
+    ema = snapshot(src, str(tmp_path / "ema.fp16.pt"), source="ema")
+    assert "ema" in ema["keys"] and "model" not in ema["keys"]
+
+
+def test_snapshot_tokenizer_same_path_is_not_an_error(tmp_path):
+    """--tokenizer weights/tokenizer.json при снапшоте в weights/ — не ошибка."""
+    cfg = tiny_cfg()
+    torch.manual_seed(0)
+    model = GPT(cfg)
+    src = str(tmp_path / "ckpt.pt")
+    torch.save({"config": asdict(cfg), "model": model.state_dict()}, src)
+    tok = tmp_path / "tokenizer.json"
+    tok.write_text('{"version": 1}', encoding="utf-8")
+    info = snapshot(src, str(tmp_path / "snap.fp16.pt"), tokenizer=str(tok))
+    assert info["tokenizer"] == str(tok)
