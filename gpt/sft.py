@@ -35,7 +35,11 @@ def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--ckpt", default="", help="чекпойнт pretrain (best.pt / model_ema.pt)")
     p.add_argument("--preset", default="m30", help="используется, если --ckpt не задан")
-    p.add_argument("--data", required=True)
+    p.add_argument("--data", required=True, nargs="+",
+                   help="один или несколько jsonl")
+    p.add_argument("--repeat", default="",
+                   help="файл:сколько — повторить рукописные диалоги, иначе их "
+                        "не слышно среди десятков тысяч корпусных пар")
     p.add_argument("--tokenizer", default="")
     p.add_argument("--out", default="out/sft")
     p.add_argument("--epochs", type=int, default=3)
@@ -104,7 +108,13 @@ def main():
     block = min(args.block_size, model.cfg.block_size)
     if block != args.block_size:
         print(f"block_size модели {model.cfg.block_size}: режем примеры по {block}")
-    ds = SFTDataset(args.data, tok, block, system=args.system)
+    repeat = {}
+    for item in filter(None, (x.strip() for x in args.repeat.split(","))):
+        if ":" not in item:
+            raise SystemExit(f"--repeat: ждал файл:число, получил {item!r}")
+        f, _, k = item.rpartition(":")
+        repeat[f] = int(k)
+    ds = SFTDataset(args.data, tok, block, system=args.system, repeat=repeat)
     total_tokens = sum(len(ids) for ids, _ in ds.examples)
     print(f"примеров: {len(ds)}, токенов: {total_tokens:,}, block={block}")
 

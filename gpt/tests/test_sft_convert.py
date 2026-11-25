@@ -83,3 +83,29 @@ def test_whitespace_is_collapsed_and_long_text_truncated():
     obj = convert_row(row, limit=100)
     assert obj["messages"][0]["content"] == "Много пробелов тут"
     assert len(obj["messages"][1]["content"]) == 100
+
+
+def test_sft_dataset_mixes_files_with_repeat(tmp_path):
+    """Рукописных диалогов десятки, корпусных — десятки тысяч.
+
+    Без --repeat модель не замечает первых: замер на 52 533 корпусных парах
+    дал ответы новостным текстом на «Привет!».
+    """
+    from minigpt.data import SFTDataset
+    from minigpt.tokenizer import BPETokenizer
+
+    tok = BPETokenizer.train(["привет как дела", "меня зовут аня"], 50, verbose=False)
+    a = tmp_path / "hand.jsonl"
+    a.write_text('{"messages": [{"role": "user", "content": "привет"},'
+                 ' {"role": "assistant", "content": "привет как дела"}]}\n', encoding="utf-8")
+    b = tmp_path / "corpus.jsonl"
+    b.write_text("\n".join(
+        '{"messages": [{"role": "user", "content": "меня зовут аня"},'
+        ' {"role": "assistant", "content": "меня зовут аня"}]}' for _ in range(5)),
+        encoding="utf-8")
+
+    one = SFTDataset([str(a), str(b)], tok, 64)
+    assert len(one) == 6
+
+    rep = SFTDataset([str(a), str(b)], tok, 64, repeat={str(a): 4})
+    assert len(rep) == 4 + 5, "файл из repeat должен повториться 4 раза"

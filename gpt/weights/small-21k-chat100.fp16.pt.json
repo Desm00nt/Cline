@@ -1,0 +1,7 @@
+{
+  "out": "weights/small-21k-chat100.fp16.pt",
+  "bytes": 32081294,
+  "step": 100,
+  "best_source": "ema",
+  "tokenizer": "weights/tokenizer.json"
+}

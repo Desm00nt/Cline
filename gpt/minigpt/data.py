@@ -68,9 +68,26 @@ class SFTDataset(Dataset):
     Обучающий сигнал считается только на ответах ассистента.
     """
 
-    def __init__(self, path: str, tok: BPETokenizer, block_size: int, system: str = ""):
+    def __init__(self, path, tok: BPETokenizer, block_size: int, system: str = "",
+                 repeat: Optional[Dict[str, int]] = None):
+        """path — один jsonl или список путей.
+
+        repeat задаёт, сколько раз повторить пары из файла: рукописных
+        диалогов десятки, корпусных — десятки тысяч, и без повтора модель
+        просто не замечает первых (замер: на 52 533 корпусных парах она
+        отвечала новостным текстом на «Привет!»).
+        """
+        paths = [path] if isinstance(path, str) else list(path)
         self.block_size = block_size
         self.examples: List[Tuple[List[int], List[int]]] = []
+        for p in paths:
+            k = (repeat or {}).get(p, 1)
+            for _ in range(max(1, k)):
+                self._read(p, tok, system)
+        if not self.examples:
+            raise ValueError(f"в {paths} нет ни одного примера")
+
+    def _read(self, path: str, tok: BPETokenizer, system: str) -> None:
         with open(path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -84,8 +101,6 @@ class SFTDataset(Dataset):
                 if len(ids) < 3:
                     continue
                 self.examples.append((ids, assistant))
-        if not self.examples:
-            raise ValueError(f"в {path} нет ни одного примера")
 
     @staticmethod
     def _render(msgs: List[Dict[str, str]], tok: BPETokenizer) -> Tuple[List[int], List[int]]:
