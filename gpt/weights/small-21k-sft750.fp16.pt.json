@@ -1,0 +1,7 @@
+{
+  "out": "weights/small-21k-sft750.fp16.pt",
+  "bytes": 32081157,
+  "step": 750,
+  "best_source": "ema",
+  "tokenizer": "weights/tokenizer.json"
+}

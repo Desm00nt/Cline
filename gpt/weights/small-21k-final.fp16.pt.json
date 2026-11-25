@@ -1,7 +1,0 @@
-{
-  "out": "weights/small-21k-final.fp16.pt",
-  "bytes": 32081148,
-  "step": 20000,
-  "best_source": "ema",
-  "tokenizer": "weights/tokenizer.json"
-}
