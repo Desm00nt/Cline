@@ -51,6 +51,13 @@ def parse_args():
     p.add_argument("--ema-decay", type=float, default=0.999)
     p.add_argument("--system", default="")
     p.add_argument("--log-every", type=int, default=20)
+    p.add_argument("--val-data", default="",
+                   help="jsonl для валидации: без него переобучение не видно")
+    p.add_argument("--eval-every", type=int, default=0,
+                   help="шагов между валидациями (0 = только в конце эпохи)")
+    p.add_argument("--eval-batches", type=int, default=16)
+    p.add_argument("--save-every", type=int, default=0,
+                   help="шагов между снапшотами лучшего чекпойнта")
     p.add_argument("--seed", type=int, default=1337)
     p.add_argument("--device", default="auto")
     p.add_argument("--sample", default="Расскажи коротко, что такое нейросеть.")
@@ -102,6 +109,30 @@ def main():
     print(f"примеров: {len(ds)}, токенов: {total_tokens:,}, block={block}")
 
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=sft_collate)
+    val_loader = None
+    if args.val_data:
+        val_ds = SFTDataset(args.val_data, tok, block, system=args.system)
+        val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                                collate_fn=sft_collate)
+        print(f"валидация: {len(val_ds)} примеров из {args.val_data}")
+
+    def evaluate() -> float:
+        """Средний loss на ответах ассистента. Без этого переобучение не видно:
+        train-loss на SFT падает и тогда, когда модель просто запомнила пары."""
+        model.eval()
+        tot, cnt = 0.0, 0
+        with torch.no_grad():
+            for j, batch in enumerate(val_loader):
+                if j >= args.eval_batches:
+                    break
+                x = batch["x"].to(device); y = batch["y"].to(device)
+                m = batch["mask"].to(device)
+                with torch.autocast(device_type=dt_name, dtype=amp_dtype,
+                                    enabled=(amp_dtype != torch.float32)):
+                    _, loss = model(x, y, loss_mask=m)
+                tot += loss.item(); cnt += 1
+        model.train()
+        return tot / max(1, cnt)
     steps_per_epoch = max(1, len(loader) // args.grad_accum)
     total_steps = steps_per_epoch * args.epochs
     warmup = max(1, int(total_steps * args.warmup_frac))
@@ -116,6 +147,7 @@ def main():
     print(f"EMA: decay={ema_decay:.5f} (горизонт ~{1/(1-ema_decay):.0f} шагов)")
     model.train()
 
+    best_val, best_step = float("inf"), 0
     step, t0 = 0, time.time()
     running, n = 0.0, 0
     for epoch in range(args.epochs):
@@ -144,7 +176,28 @@ def main():
                           f"loss={running/n:.4f} lr={args.lr*mult:.2e} "
                           f"({step/max(1e-9,(time.time()-t0)):.2f} шаг/с)", flush=True)
                     running, n = 0.0, 0
+                if val_loader is not None and args.eval_every and step % args.eval_every == 0:
+                    vl = evaluate()
+                    print(f"    eval: val_loss={vl:.4f} (ppl={np.exp(vl):.1f})", flush=True)
+                    if vl < best_val:
+                        best_val, best_step = vl, step
+                        backup = ema.copy_to(model)
+                        torch.save({"config": model.cfg.to_dict(), "model": model.state_dict(),
+                                    "step": step, "val_loss": vl, "best_source": "ema"},
+                                   os.path.join(args.out, "best.pt"))
+                        EMA.restore(model, backup)
+                        print(f"    сохранён лучший чекпойнт (val={vl:.4f}, шаг {step})", flush=True)
         print(f"эпоха {epoch+1} завершена, средняя loss={running/max(1,n):.4f}")
+        if val_loader is not None:
+            vl = evaluate()
+            print(f"  eval в конце эпохи: val_loss={vl:.4f} (ppl={np.exp(vl):.1f})", flush=True)
+            if vl < best_val:
+                best_val, best_step = vl, step
+                backup = ema.copy_to(model)
+                torch.save({"config": model.cfg.to_dict(), "model": model.state_dict(),
+                            "step": step, "val_loss": vl, "best_source": "ema"},
+                           os.path.join(args.out, "best.pt"))
+                EMA.restore(model, backup)
 
     # сохраняем и обычные, и EMA-веса
     torch.save({"config": model.cfg.to_dict(), "model": model.state_dict()},
