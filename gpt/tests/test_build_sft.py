@@ -144,3 +144,76 @@ def test_answer_is_never_empty(tmp_path):
             continue
         obj = json.loads(line)
         assert obj["messages"][1]["content"].strip()
+
+
+def test_iter_doc_chunks_streams_big_file(tmp_path):
+    """corpus.txt на гигабайт читается кусками, а не fh.read() целиком.
+
+    Регрессия: MemoryError на data/raw_real/novaya_gazeta/corpus.txt (1023M
+    символов) при машине с 4 ГБ RAM.
+    """
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    from build_sft_from_corpus import iter_doc_chunks, split_docs, READ_CHUNK
+
+    doc = "Предложение одно. " * 40          # > 200 символов, проходит фильтр
+    text = "\n\n".join(f"{doc} {i}" for i in range(1600))
+    f = tmp_path / "corpus.txt"
+    f.write_text(text, encoding="utf-8")
+    assert len(text) > READ_CHUNK, "тест должен быть больше куска чтения"
+
+    streamed = list(iter_doc_chunks(str(f), per_file=False))
+    whole = split_docs(text)
+    assert streamed == whole, "чтение кусками обязано давать те же документы"
+
+    # per_file=True отдаёт файл одним документом
+    as_one = list(iter_doc_chunks(str(f), per_file=True))
+    assert as_one == [text.strip()]
+
+
+def test_big_file_is_never_read_whole(tmp_path):
+    """per_file=True не читает гигабайтный corpus.txt целиком."""
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    from build_sft_from_corpus import iter_doc_chunks, READ_CHUNK
+
+    doc = "Предложение одно. " * 40
+    text = "\n\n".join(f"{doc} {i}" for i in range(7000))
+    f = tmp_path / "corpus.txt"
+    f.write_text(text, encoding="utf-8")
+    assert os.path.getsize(str(f)) > 8 * READ_CHUNK
+
+    # per_file=True, но файл большой -> всё равно режем по документам
+    streamed = list(iter_doc_chunks(str(f), per_file=True))
+    assert len(streamed) > 1, "большой файл не должен отдаваться одним документом"
+    assert streamed == list(iter_doc_chunks(str(f), per_file=False))
+
+
+def test_link_words_are_not_terms():
+    """«Дальше — ...» из художественного текста не должно становиться термином.
+
+    Замер на корпусе: топ-25 «терминов» наполовину состоял из слов-связок.
+    """
+    import sys, random
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    from build_sft_from_corpus import make_definition_tasks, is_real_term
+
+    assert not is_real_term("Дальше")
+    assert not is_real_term("И вот")
+    assert not is_real_term("Но это")
+    assert not is_real_term("Первый")
+    assert not is_real_term("Вот -")          # после strip остаётся «вот»
+    assert not is_real_term("С другой стороны")
+    assert not is_real_term("Для начала")
+    assert is_real_term("Физраствор")
+    assert is_real_term("Центральное христианское таинство")
+    assert is_real_term("Государственная дума")
+
+    rng = random.Random(0)
+    body = "определение " * 20
+    junk = "\n".join(f"{w} — {body}" for w in ("Дальше", "И вот", "Но это", "Первый"))
+    real = f"Физраствор — {body}"
+    got = [m["messages"][0]["content"] for m in make_definition_tasks(junk + "\n" + real, rng)]
+    # формулировка вопроса выбирается наугад, важен сам отбор: одна пара, про термин
+    assert len(got) == 1 and "физраствор" in got[0].lower(), got
+    assert not any(w in " ".join(got).lower() for w in ("дальше", "и вот", "но это"))

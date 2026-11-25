@@ -22,3 +22,6 @@ __pycache__/
 # ВАЖНО: weights/tokenizer.json в git обязан быть, иначе веса не читаются
 gpt/data/raw_balanced/
 gpt/data/prepared_balanced/
+gpt/data/sft/built.jsonl
+gpt/data/sft/train.jsonl
+gpt/data/sft/val.jsonl

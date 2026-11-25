@@ -124,6 +124,54 @@ def _emit_section(topic: str, body: str, rng: random.Random) -> Iterable[Dict]:
     yield _msgs(tpl, body[:1200])
 
 
+# Регулярное выражение DEFINITION ловит любое слово с заглавной буквы, поэтому в
+# «термины» попадают слова-связки из художественного текста: «Дальше — ...»,
+# «И вот — ...», «Но это — ...». Замер на 27 602 парах: топ-25 терминов на
+#половину состоит из таких слов. Отбрасываем их явно.
+NON_TERMS = {
+    "дальше", "а дальше", "потом", "а потом", "теперь", "а теперь", "и вот",
+    "но это", "и это", "а еще", "а ещё", "и главное", "но главное", "итак",
+    "однако", "например", "кроме того", "тем не менее", "в том числе",
+    "более того", "прежде всего", "в частности", "таким образом",
+    "в результате", "при этом", "в то же время", "все это", "всё это",
+    "это -", "первый", "первая", "первое", "второй", "вторая", "второе",
+    "третье", "третья", "другое дело", "сегодня", "завтра", "вчера",
+    "автор", "в этом", "итак,", "итак:",
+    "другой пример", "с другой стороны", "с одной стороны", "то же самое",
+    "иное дело", "отдельная тема", "среди них", "для начала", "вот -",
+    "перед вами", "причина", "почему", "сначала", "здесь", "рассказ",
+    "кроме того,", "в общем", "в конце концов", "так или иначе",
+}
+
+
+# Обороты, которые выдают связку, а не термин: «с другой стороны — ...»,
+# «для начала — ...». Держим отдельно от NON_TERMS: их видно по началу фразы.
+LINK_PREFIXES = (
+    "это", "но ", "а ", "и ", "не ", "с ", "для ", "в ", "во ", "к ", "на ",
+    "из ", "от ", "до ", "по ", "при ", "без ", "перед ", "после ", "между ",
+    "другой", "другое", "иное", "отдельн", "то же", "так ", "тут ", "вот ",
+    "здесь", "там ", "потом", "далее", "затем", "сначала", "почему", "потому",
+    "если ", "когда ", "хотя ", "чтобы", "каждый", "всякий", "любой", "один",
+    "перв", "втор", "треть", "четверт", "последн", "следующ", "например",
+)
+
+
+def is_real_term(term: str) -> bool:
+    """Термин годится, если это не слово-связка и не служебная фраза."""
+    t = term.lower().strip(" .,;:-")
+    if not t or t in NON_TERMS:
+        return False
+    words = t.split()
+    if words[0] in NON_TERMS:
+        return False
+    # проверяем и первое слово целиком: «Вот — ...» после strip даёт «вот»,
+    # а префикс в списке записан с пробелом («вот ») и не срабатывает
+    if t.startswith(LINK_PREFIXES) or words[0] in {p.strip() for p in LINK_PREFIXES}:
+        return False
+    # термин из трёх и более слов почти всегда оборот, а не понятие
+    return len(words) <= 3
+
+
 def make_definition_tasks(doc: str, rng: random.Random) -> Iterable[Dict]:
     """«ТЕРМИН — определение»: самый чистый вид QA-пары."""
     for line in doc.split("\n"):
@@ -132,6 +180,8 @@ def make_definition_tasks(doc: str, rng: random.Random) -> Iterable[Dict]:
             continue
         term, definition = m.group(1).strip(), m.group(2).strip()
         if not (4 <= len(term) <= 40) or len(definition) < MIN_DEFINITION_CHARS:
+            continue
+        if not is_real_term(term):
             continue
         yield _msgs(rng.choice(ASK_SECTION).format(topic=term.lower()),
                     definition[:900])
@@ -155,6 +205,40 @@ def iter_files(root: str) -> Iterable[str]:
                 yield os.path.join(dirpath, n)
 
 
+READ_CHUNK = 1 << 20   # 1M символов на шаг чтения corpus.txt
+
+
+def iter_doc_chunks(path: str, per_file: bool) -> Iterable[str]:
+    """Документы файла без загрузки файла целиком.
+
+    corpus.txt у novaya_gazeta — 1023M символов: fh.read() плюс re.split дают
+    ~4 ГБ и падают в MemoryError на машине с 4 ГБ RAM. Читаем кусками, хвост
+    переносим в следующий шаг (разделитель может попасть на границу куска).
+    """
+    # per_file=True значит «файл = один документ» (режим docs/), но для
+    # corpus.txt на гигабайт это MemoryError: такой файл режем по документам.
+    if per_file and os.path.getsize(path) <= 8 * READ_CHUNK:
+        with open(path, encoding="utf-8", errors="ignore") as fh:
+            yield fh.read().strip()
+        return
+    buf = ""
+    with open(path, encoding="utf-8", errors="ignore") as fh:
+        while True:
+            chunk = fh.read(READ_CHUNK)
+            if not chunk:
+                break
+            buf += chunk
+            parts = re.split(r"\n\s*\n", buf)
+            buf = parts.pop()          # последний кусок может быть неполным
+            for part in parts:
+                part = part.strip()
+                if len(part) > 200:
+                    yield part
+    part = buf.strip()
+    if len(part) > 200:
+        yield part
+
+
 def build(root: str, out_path: str, seed: int = 1337, per_doc: int = 1,
           kinds: Tuple[str, ...] = ("summary", "heading", "definition",
                                     "continuation"), max_rows: int = 0,
@@ -172,10 +256,7 @@ def build(root: str, out_path: str, seed: int = 1337, per_doc: int = 1,
     stats["docs"] = 0
     with open(out_path, "w", encoding="utf-8") as f:
         for path in iter_files(root):
-            with open(path, encoding="utf-8", errors="ignore") as fh:
-                text = fh.read()
-            chunks = [text.strip()] if per_file else split_docs(text)
-            for doc in chunks:
+            for doc in iter_doc_chunks(path, per_file):
                 stats["docs"] += 1
                 for kind in kinds:
                     fn = EXTRACTORS[kind]

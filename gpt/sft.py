@@ -91,9 +91,15 @@ def main():
         model = GPT(cfg).to(device)
         print("обучение SFT с нуля (без pretrain — качество будет низким)")
 
-    ds = SFTDataset(args.data, tok, args.block_size, system=args.system)
+    # Контекст берём из модели, а не из --block-size: у чекпоинта block_size
+    # уже зашит в конфиг, и последовательность длиннее него падает в
+    # forward() на assert. --block-size остаётся пределом сверху.
+    block = min(args.block_size, model.cfg.block_size)
+    if block != args.block_size:
+        print(f"block_size модели {model.cfg.block_size}: режем примеры по {block}")
+    ds = SFTDataset(args.data, tok, block, system=args.system)
     total_tokens = sum(len(ids) for ids, _ in ds.examples)
-    print(f"примеров: {len(ds)}, токенов: {total_tokens:,}, block={args.block_size}")
+    print(f"примеров: {len(ds)}, токенов: {total_tokens:,}, block={block}")
 
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=sft_collate)
     steps_per_epoch = max(1, len(loader) // args.grad_accum)
