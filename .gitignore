@@ -26,3 +26,5 @@ gpt/data/sft/built.jsonl
 gpt/data/sft/train.jsonl
 gpt/data/sft/val.jsonl
 gpt/data/sft/train_corpus.jsonl
+gpt/data/sft/hand_train.jsonl
+gpt/data/sft/hand_val.jsonl
