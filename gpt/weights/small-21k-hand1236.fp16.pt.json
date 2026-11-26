@@ -1,0 +1,7 @@
+{
+  "out": "weights/small-21k-hand1236.fp16.pt",
+  "bytes": 32081367,
+  "step": 1674,
+  "best_source": "ema",
+  "tokenizer": ""
+}
