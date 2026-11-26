@@ -25,3 +25,4 @@ gpt/data/prepared_balanced/
 gpt/data/sft/built.jsonl
 gpt/data/sft/train.jsonl
 gpt/data/sft/val.jsonl
+gpt/data/sft/train_corpus.jsonl
